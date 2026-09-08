@@ -505,6 +505,24 @@ function scopeCounts(){
 
 const PER = 100;
 
+/* Сколько строк подходит под текст поиска без учёта раздела и фильтров.
+   Нужно, чтобы сказать админу «в этом разделе пусто, а вообще есть». */
+function qMatches(){
+  const q = F.q.trim().toLowerCase();
+  if (!q) return [];
+  return ROWS.filter(r => (r.c + ' ' + r.s + ' ' + r.n + ' ' + r.a + ' ' + r.k).toLowerCase().includes(q));
+}
+
+/* Где лежит строка — человеческим языком. */
+function whereIs(code){
+  const c = claimOf(code);
+  if (!c) return 'свободна, лежит в общем списке';
+  if (c.s === 'taken') return 'в работе у ' + c.u;
+  if (c.s === 'done')  return 'сдана в архив, отметил ' + c.u;
+  if (c.s === 'excl')  return 'убрана из пула';
+  return c.s;
+}
+
 function renderReport(){
   const n = scopeCounts();
   const list = filtered();
@@ -542,7 +560,10 @@ function renderReport(){
           <tbody>${slice.map(rowHtml).join('')}</tbody>
         </table>
       </div>
-      ${list.length ? '' : '<div class="empty">Ничего не найдено. Снимите фильтры или загляните в другой раздел.</div>'}
+      ${list.length ? '' : (isAdmin && qMatches().length
+        ? `<div class="empty">В этом разделе ничего нет, но по запросу «${esc(F.q.trim())}» в пуле найдено ${qMatches().length}.
+           <button class="btn" id="qall" style="margin-left:8px">Искать во всех разделах</button></div>`
+        : '<div class="empty">Ничего не найдено. Снимите фильтры или загляните в другой раздел.</div>')}
       ${pages > 1 ? `<div class="pager">
         <button ${F.page===1?'disabled':''} data-p="${F.page-1}">← Назад</button>
         <span>Страница ${F.page} из ${pages}</span>
@@ -554,7 +575,23 @@ function renderReport(){
   $('#fy').onchange = e => { F.year = e.target.value; F.page = 1; render(); };
   $('#ft').onchange = e => { F.type = e.target.value; F.page = 1; render(); };
   $('#fa').onchange = e => { F.author = e.target.value; F.page = 1; render(); };
-  let qt; $('#fq').oninput = e => { clearTimeout(qt); const v = e.target.value; qt = setTimeout(() => { F.q = v; F.page = 1; render(); $('#fq') && $('#fq').focus(); }, 250); };
+  // после перерисовки возвращаем не только фокус, но и позицию курсора,
+  // иначе каретка прыгает в начало строки и дописать слово невозможно
+  let qt; $('#fq').oninput = e => {
+    clearTimeout(qt);
+    const v = e.target.value, pos = e.target.selectionStart;
+    qt = setTimeout(() => {
+      F.q = v; F.page = 1; render();
+      const el = $('#fq');
+      if (el){ el.focus(); try { el.setSelectionRange(pos, pos); } catch(_){} }
+    }, 250);
+  };
+  const qa = $('#qall');
+  if (qa) qa.onclick = () => {
+    const m = qMatches();
+    F.scope = m.some(r => statusOf(r.c) !== 'excl') ? 'all' : 'excl';
+    F.page = 1; render();
+  };
   $('#view').querySelectorAll('.pager button').forEach(b => b.onclick = () => { F.page = +b.dataset.p; render(); window.scrollTo(0,0); });
   $('#view').querySelectorAll('button[data-a]').forEach(b => b.onclick = async () => { b.disabled = true; await act(b.dataset.code, b.dataset.a); render(); });
 }
@@ -724,6 +761,7 @@ function renderAdd(){
         <input id="rk" placeholder="Куратор" style="width:180px" autocomplete="off">
         <button class="btn pri" id="rgo">Добавить в пул</button>
       </div>
+      <div id="rmsg"></div>
       <div class="tblwrap"><table>
         <thead><tr><th>Код</th><th>Создан</th><th>Поставщик</th><th>Тип заявки</th><th>Тема</th>
         <th>Автор</th><th>Статус</th><th>Кто взял</th><th>Добавил</th><th></th></tr></thead>
@@ -749,9 +787,24 @@ function renderAdd(){
     const code = $('#rc').value.trim();
     const sup  = $('#rs').value.trim();
     const typ  = $('#rt').value.trim();
+    $('#rmsg').innerHTML = '';
     if (!code){ toast('Укажите код договора'); return; }
     if (/[\/\s]/.test(code)){ toast('В коде нельзя использовать пробелы и «/»'); return; }
-    if (BY_CODE.has(code)){ toast('Такой код уже есть в списке'); return; }
+    // код уже в пуле — говорим, что это за строка и где она лежит
+    if (BY_CODE.has(code)){
+      const r = BY_CODE.get(code);
+      $('#rmsg').innerHTML = `<div class="pad" style="padding-top:0">
+        <p class="err">Код ${esc(code)} уже есть в пуле: ${esc(r.d)} · ${esc(r.s)} · ${esc(r.t)}
+        ${r.man ? '(добавлена вручную)' : '(из выгрузки, автор ' + esc(r.a) + ')'} — ${esc(whereIs(code))}.</p>
+        <button class="btn" id="rshow">Показать её в общем отчёте</button></div>`;
+      $('#rshow').onclick = () => {
+        tab = 'report';
+        F.scope = statusOf(code) === 'excl' ? 'excl' : 'all';
+        F.q = code; F.year = ''; F.type = ''; F.author = ''; F.page = 1;
+        render();
+      };
+      return;
+    }
     if (!sup){ toast('Укажите поставщика'); return; }
     if (!typ){ toast('Укажите тип заявки'); return; }
     const d = $('#rd').value || new Date().toISOString().slice(0,10);
