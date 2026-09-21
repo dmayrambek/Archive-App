@@ -381,7 +381,7 @@ const FireStore = {
 /* ============================ СЕССИЯ ============================ */
 
 let ME = localStorage.getItem('gte_user') || '';
-let isAdmin = sessionStorage.getItem('gte_admin') === '1';
+let isAdmin = localStorage.getItem('gte_admin') === '1';
 let tab = 'report';
 const F = { scope:'free', year:'', type:'', author:'', q:'', page:1 };
 let lbMonth = null, logUser = '', logMonth = '';
@@ -986,7 +986,7 @@ async function checkAdmin(login, pass){
   catch(e){ console.error(e); return false; }
 }
 async function enterAdmin(){
-  isAdmin = true; sessionStorage.setItem('gte_admin','1');
+  isAdmin = true; localStorage.setItem('gte_admin','1');
   if (store.subscribeAdmin) await store.subscribeAdmin();
   if (!ME) await setMe(ADMIN_NAME);      // вход прямо с экрана выбора имени
   tab = 'lb'; render();
@@ -1012,7 +1012,7 @@ $('#pinGo').onclick = async () => {
 };
 $('#pinPass').onkeydown = e => { if (e.key === 'Enter') $('#pinGo').click(); };
 $('#pinLogin').onkeydown = e => { if (e.key === 'Enter') $('#pinPass').focus(); };
-$('#admOut').onclick = () => { isAdmin = false; sessionStorage.removeItem('gte_admin'); tab = 'report'; render(); };
+$('#admOut').onclick = () => { isAdmin = false; localStorage.removeItem('gte_admin'); tab = 'report'; render(); };
 if (location.hash === '#admin') $('#admBtn').click();
 
 /* ============================ СТАРТ ============================ */
