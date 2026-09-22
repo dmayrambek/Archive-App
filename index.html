@@ -267,7 +267,13 @@ function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add
 
 /* предупреждение в шапке: пишем сюда, когда что-то отвалилось, но работать можно */
 let WARN = '';
-const errText = e => String((e && (e.message || e.code)) || e || 'ошибка').slice(0, 120);
+const errText = e => {
+  const c = String((e && e.code) || ''), m = String((e && e.message) || '');
+  if (c.includes('resource-exhausted') || /quota/i.test(m)) return 'дневной лимит базы исчерпан, отметки не сохраняются';
+  if (c.includes('permission-denied')) return 'правила базы не дают доступ';
+  if (c.includes('unavailable')) return 'нет связи с базой';
+  return (m || c || 'ошибка').slice(0, 120);
+};
 function warn(msg){ WARN = msg; console.warn(msg); try { renderChrome(); } catch(_){} }
 
 /* ============================ ХРАНИЛИЩЕ ============================
@@ -354,16 +360,20 @@ const FireStore = {
     const fs = this.fs;
     await fs.updateDoc(this.stateRef, new fs.FieldPath('users', name), fs.deleteField());
   },
-  // журнал и ручные баллы читает только админ — экономим чтения
-  async subscribeAdmin(){
-    if (this.admSubbed) return; this.admSubbed = true;
+  // журнал и ручные баллы читает только админ и только когда сам открыл вкладку.
+  // подписок тут быть не должно: при каждом переподключении Firestore перечитывает
+  // весь запрос заново, и открытая вкладка за ночь съедает дневной лимит чтений
+  async loadAdmin(){
     const fs = this.fs;
-    fs.onSnapshot(fs.query(fs.collection(this.db, COL.log), fs.orderBy('at','desc'), fs.limit(2000)),
-      snap => { S.log = snap.docs.map(d => d.data()); this.onChange(); });
+    const [lg, mn] = await Promise.all([
+      fs.getDocs(fs.query(fs.collection(this.db, COL.log), fs.orderBy('at','desc'), fs.limit(200))),
+      fs.getDocs(fs.collection(this.db, COL.manual))
+    ]);
+    S.log = lg.docs.map(d => d.data());
     // id документа ставим ПОСЛЕ данных: в старых записях есть своё поле id,
     // и оно перетирало настоящий id — из-за этого «Удалить» ничего не удаляло
-    fs.onSnapshot(fs.collection(this.db, COL.manual),
-      snap => { S.manual = snap.docs.map(d => Object.assign({}, d.data(), { id:d.id })); this.onChange(); });
+    S.manual = mn.docs.map(d => Object.assign({}, d.data(), { id:d.id }));
+    this.onChange();
   },
   async setClaim(code, c){
     const fs = this.fs;
@@ -600,7 +610,12 @@ function renderReport(){
     F.page = 1; render();
   };
   $('#view').querySelectorAll('.pager button').forEach(b => b.onclick = () => { F.page = +b.dataset.p; render(); window.scrollTo(0,0); });
-  $('#view').querySelectorAll('button[data-a]').forEach(b => b.onclick = async () => { b.disabled = true; await act(b.dataset.code, b.dataset.a); render(); });
+  $('#view').querySelectorAll('button[data-a]').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { await act(b.dataset.code, b.dataset.a); }
+    catch(e){ console.error(e); b.disabled = false; toast('Не сохранено: ' + errText(e)); }
+    render();
+  });
 }
 
 function rowHtml(r){
@@ -737,10 +752,11 @@ function renderLog(){
           <td>${esc(r.s || '')}</td><td class="nowrap">${esc(r.t || '')}</td><td class="nowrap">${esc(r.a || '')}</td></tr>`;
         }).join('') : '<tr><td colspan="7" class="empty">Пока пусто.</td></tr>'}</tbody>
       </table></div>
-      <div class="pager"><button id="lgcsv">Скачать CSV для Excel</button></div>
+      <div class="pager"><button id="lgcsv">Скачать CSV для Excel</button> <button id="lgref">Обновить</button></div>
     </div>`;
   $('#lu').onchange = e => { logUser = e.target.value; render(); };
   $('#lm').onchange = e => { logMonth = e.target.value; render(); };
+  $('#lgref').onclick = () => ensureAdmin(true);
   $('#lgcsv').onclick = () => csv('journal', [['Время','Сотрудник','Действие','Код','Поставщик','Тип','Автор'],
     ...list.map(e => { const r = BY_CODE.get(e.code) || {}; return [fmtTime(e.at), e.u, NAME[e.action] || e.action, e.code, r.s || '', r.t || '', r.a || '']; })]);
 }
@@ -914,6 +930,15 @@ function csv(name, rows){
   a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/* админские данные тянем один раз за загрузку страницы, повторно — только по кнопке */
+let admLoaded = false;
+function ensureAdmin(force){
+  if (!isAdmin || !store || !store.loadAdmin) return;
+  if (admLoaded && !force) return;
+  admLoaded = true;
+  store.loadAdmin().catch(e => { admLoaded = false; console.error(e); toast('Журнал не загрузился: ' + errText(e)); });
+}
+
 function render(){
   rebuildRows();                       // пул: выгрузка + добавленные вручную
   // админ сбросил привязку или имя занял кто-то другой — возвращаем на экран входа
@@ -922,6 +947,7 @@ function render(){
     buildLogin(TAKEN_MSG); $('#login').classList.remove('hide');
   }
   renderChrome();
+  if (isAdmin && (tab === 'lb' || tab === 'log' || tab === 'manual')) ensureAdmin();
   if (tab === 'report') renderReport();
   else if (tab === 'types') renderTypes();
   else if (isAdmin && tab === 'lb') renderLeaderboard();
@@ -1006,7 +1032,7 @@ async function checkAdmin(login, pass){
 }
 async function enterAdmin(){
   isAdmin = true; localStorage.setItem('gte_admin','1');
-  if (store.subscribeAdmin) await store.subscribeAdmin();
+  admLoaded = false;                     // при входе в админку тянем журнал заново
   if (!ME) await setMe(ADMIN_NAME);      // вход прямо с экрана выбора имени
   tab = 'lb'; render();
 }
@@ -1043,7 +1069,6 @@ buildLogin();                        // имена на экране входа 
 store = FIREBASE_CONFIG ? FireStore : LocalStore;
 try {
   await store.init(render);
-  if (isAdmin && store.subscribeAdmin) await store.subscribeAdmin();
 } catch (e){
   console.error(e);
   toast('База недоступна, включён демо-режим');
