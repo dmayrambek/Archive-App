@@ -265,6 +265,11 @@ const monthLabel = m => { const [y,mm] = m.split('-'); return MONTH_RU[+mm-1] + 
 let toastT;
 function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2600); }
 
+/* предупреждение в шапке: пишем сюда, когда что-то отвалилось, но работать можно */
+let WARN = '';
+const errText = e => String((e && (e.message || e.code)) || e || 'ошибка').slice(0, 120);
+function warn(msg){ WARN = msg; console.warn(msg); try { renderChrome(); } catch(_){} }
+
 /* ============================ ХРАНИЛИЩЕ ============================
    claims: { КОД: {u:кто, s:'taken'|'done', ta:взял, da:сдал} }
    log:    [{u, code, action, at}]
@@ -448,8 +453,10 @@ function knownMonths(){
 /* ============================ ОТРИСОВКА ============================ */
 
 function renderChrome(){
-  $('#banner').style.display = store && store.mode === 'demo' ? 'block' : 'none';
-  $('#banner').textContent = 'Демо-режим: отметки сохраняются только в этом браузере. Для общей работы команды вставьте конфигурацию Firebase в начало файла.';
+  const demoMsg = 'Демо-режим: отметки сохраняются только в этом браузере. Для общей работы команды вставьте конфигурацию Firebase в начало файла.';
+  const bannerMsg = WARN || (store && store.mode === 'demo' ? demoMsg : '');
+  $('#banner').style.display = bannerMsg ? 'block' : 'none';
+  $('#banner').textContent = bannerMsg;
 
   const my = tally(null).find(x => x.u === ME) || { done:0, taken:0, manual:0 };
   const myMonth = tally(monthOf(Date.now())).find(x => x.u === ME) || { done:0, manual:0 };
@@ -943,7 +950,13 @@ async function setMe(n){
   // админ входит по PIN, привязка к устройству на него не распространяется:
   // иначе с нового компьютера в админку было бы не попасть
   if (n === ADMIN_NAME){ ME = n; localStorage.setItem('gte_user', n); $('#login').classList.add('hide'); render(); return; }
-  const res = await store.claimName(n);
+  let res;
+  try { res = await store.claimName(n); }
+  catch(e){                            // база недоступна — вход не блокируем
+    console.error(e);
+    warn('База недоступна (' + errText(e) + ') — имя пока не закреплено за устройством. Работать можно.');
+    res = { ok:true };
+  }
   if (!res.ok){ buildLogin(TAKEN_MSG); return; }
   ME = n; localStorage.setItem('gte_user', n);
   $('#login').classList.add('hide'); render();
@@ -968,7 +981,13 @@ async function verifyMe(){
     buildLogin(TAKEN_MSG); $('#login').classList.remove('hide');
     return false;
   }
-  const res = await store.claimName(ME);           // привязки нет — занимаем заново
+  let res;
+  try { res = await store.claimName(ME); }           // привязки нет — занимаем заново
+  catch(e){                                          // база недоступна — не выкидываем человека
+    console.error(e);
+    warn('База недоступна (' + errText(e) + ') — привязка имени не обновлена. Работать можно.');
+    return true;
+  }
   if (res.ok) return true;
   localStorage.removeItem('gte_user'); ME = '';
   buildLogin(TAKEN_MSG); $('#login').classList.remove('hide');
@@ -1019,6 +1038,8 @@ if (location.hash === '#admin') $('#admBtn').click();
 
 $('#asof').textContent = SNAPSHOT_LABEL + ' · ' + ROWS.length + ' договоров в пуле';
 
+buildLogin();                        // имена на экране входа есть всегда, что бы ни упало дальше
+
 store = FIREBASE_CONFIG ? FireStore : LocalStore;
 try {
   await store.init(render);
@@ -1028,7 +1049,14 @@ try {
   toast('База недоступна, включён демо-режим');
   store = LocalStore; await store.init(render);
 }
-if (await verifyMe()) $('#login').classList.add('hide');
+let meOk = false;
+try { meOk = await verifyMe(); }
+catch(e){                            // подстраховка: любой сбой проверки не должен ломать вход
+  console.error(e);
+  warn('Сбой проверки имени (' + errText(e) + '). Работать можно.');
+  meOk = !!ME;
+}
+if (meOk) $('#login').classList.add('hide');
 else buildLogin($('#loginErr').textContent);
 render();
 </script>
